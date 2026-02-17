@@ -1,0 +1,41 @@
+REQUEST:
+QA_URL="https://cloudrun-service-phase-1-2b-x5uf5bvkta-uk.a.run.app/v3beta1/webhook"
+TOKEN=$(gcloud auth print-identity-token)
+
+curl -L -X POST "$QA_URL" \
+-H "Content-Type: application/json" \
+-H "Authorization: Bearer $TOKEN" \
+-d '{
+  "fulfillmentInfo": {
+    "tag": "cdpMobile"
+  },
+  "sessionInfo": {
+    "parameters": {
+      "phone": "+524525254857"
+    }
+  }
+}'
+
+RESPONSE:
+{
+    "fulfillmentResponse": {
+        "messages": []
+    },
+    "fulfillmentText": "",
+    "sessionInfo": {
+        "parameters": {
+            "api_data": "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",
+            "cdp_email": "kristinanavarretec@gmail.com",
+            "cdp_mobile": "+520004525254857",
+            "customerId": "34f5b91d-953c-4876-9714-c8c4abded183",
+            "isUserIdentified": true,
+            "phone": "+524525254857",
+            "primer_nombre": "Cristina",
+            "redacted_email": "kri***************@gmail.com",
+            "redacted_mobile": "4857"
+        }
+    }
+}
+
+# Instruction
+- 2. [INIT] Assign 'universidaduvlalexa@gmail.com' to $session.params.user_mail.

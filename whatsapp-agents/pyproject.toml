@@ -1,0 +1,13 @@
+# Copyright 2025 Google. This software is provided as-is, without warranty or representation for any use or purpose. Your use of it is subject to your agreement with Google.
+[project]
+name = "whatsapp-agents"
+version = "0.0.1"
+description = "Agent to send whatsapp messages based on user interactions"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "google-adk==1.20.0",
+    "google-genai==1.54.0",
+    "google-auth>=2.43.0",
+    "google-cloud-secret-manager>=2.21.0",
+]

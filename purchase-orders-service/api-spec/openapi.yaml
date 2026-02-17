@@ -1,0 +1,94 @@
+openapi: 3.0.0
+info:
+  title: Cloud Run Webhook Service
+  version: 1.0.0
+  description: API specification for the Cloud Run Webhook Service based on the provided sample.
+servers:
+  - url: https://cloudrun-service-phase-1-2b-x5uf5bvkta-uk.a.run.app
+    description: Production Server
+paths:
+  /v3beta1/webhook:
+    post:
+      summary: Webhook Endpoint
+      description: Handles webhook requests with fulfillment and session info, returning processed session data including customer identification.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fulfillmentInfo:
+                  type: object
+                  properties:
+                    tag:
+                      type: string
+                      example: "cdpMobile"
+                sessionInfo:
+                  type: object
+                  properties:
+                    parameters:
+                      type: object
+                      properties:
+                        phone:
+                          type: string
+                          example: "+524525254857"
+      responses:
+        '200':
+          description: Successful response containing fulfillment text and updated session parameters.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fulfillmentResponse:
+                    type: object
+                    properties:
+                      messages:
+                        type: array
+                        items: {}
+                  fulfillmentText:
+                    type: string
+                    example: ""
+                  sessionInfo:
+                    type: object
+                    properties:
+                      parameters:
+                        type: object
+                        properties:
+                          api_data:
+                            type: string
+                            description: Base64 encoded or encrypted API data string
+                          cdp_email:
+                            type: string
+                            format: email
+                            example: "kristinanavarretec@gmail.com"
+                          cdp_mobile:
+                            type: string
+                            example: "+520004525254857"
+                          customerId:
+                            type: string
+                            format: uuid
+                            example: "34f5b91d-953c-4876-9714-c8c4abded183"
+                          isUserIdentified:
+                            type: boolean
+                            example: true
+                          phone:
+                            type: string
+                            example: "+524525254857"
+                          primer_nombre:
+                            type: string
+                            example: "Cristina"
+                          redacted_email:
+                            type: string
+                            example: "kri***************@gmail.com"
+                          redacted_mobile:
+                            type: string
+                            example: "4857"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

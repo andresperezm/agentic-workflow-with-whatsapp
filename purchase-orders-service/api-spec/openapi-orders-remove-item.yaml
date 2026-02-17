@@ -1,0 +1,87 @@
+openapi: 3.0.0
+info:
+  title: Order Management API
+  description: API for retrieving and filtering user orders from Firestore.
+  version: 1.0.0
+servers:
+  - url: https://order-api-63621244483.us-central1.run.app
+    description: Production server
+paths:
+  /orders/remove-item:
+    post:
+      summary: Remove an item from an order
+      description: Removes a specific item from a user's order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                orderId:
+                  type: string
+                productId:
+                  type: string
+              required:
+                - email
+                - orderId
+                - productId
+      responses:
+        '200':
+          description: Item removed successfully
+        '400':
+          description: Bad Request - Missing required fields
+        '404':
+          description: Not Found - Order or item not found
+        '500':
+          description: Internal Server Error
+components:
+  schemas:
+    Order:
+      type: object
+      properties:
+        orderId:
+          type: string
+          example: "123"
+        status:
+          type: string
+          enum: [creada, procesando, enviada, entregada, cancelada]
+          example: creada
+        totalAmount:
+          type: number
+          example: 10
+        createdAt:
+          type: string
+          example: 2026-01-21 06:16
+        itemCount:
+          type: number
+          example: 10
+    Item:
+      type: object
+      properties:
+        orderId:
+          type: string
+          example: "12345678"
+        productId:
+          type: string
+          example: "a1b2c3d4e5"
+        name:
+          type: string
+          example: "producto increíble"
+        quantity:
+          type: string
+          example: "2"
+        priceAtPurchase:
+          type: string
+          example: "99.99"
+        image:
+          type: string
+          format: uri
+          example: "https://picsum.photos/seed/a1b2c3d4/200"
+        status:
+          type: string
+          enum: [creada, procesando, enviada, entregada, cancelada]
+          example: "enviada"

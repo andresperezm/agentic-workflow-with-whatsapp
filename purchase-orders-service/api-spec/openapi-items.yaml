@@ -1,0 +1,89 @@
+openapi: 3.0.0
+info:
+  title: Order Management API
+  description: API for retrieving and filtering user orders from Firestore.
+  version: 1.0.0
+servers:
+  - url: https://order-api-63621244483.us-central1.run.app
+    description: Production server
+paths:
+  /items:
+    get:
+      summary: Retrieve purchased items
+      description: Returns a list of all items from all orders for a given user. Can be filtered by a specific order ID.
+      parameters:
+        - name: email
+          in: query
+          description: Filter items by user email address
+          required: true
+          schema:
+            type: string
+            format: email
+            example: andresperezm@google.com
+        - name: orderId
+          in: query
+          description: Filter items by a specific order ID
+          required: false
+          schema:
+            type: string
+            example: "12345678"
+      responses:
+        '200':
+          description: A list of purchased items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Item'
+        '400':
+          description: Bad Request - User email is required
+        '500':
+          description: Internal Server Error
+components:
+  schemas:
+    Order:
+      type: object
+      properties:
+        orderId:
+          type: string
+          example: "123"
+        status:
+          type: string
+          enum: [creada, procesando, enviada, entregada, cancelada]
+          example: creada
+        totalAmount:
+          type: number
+          example: 10
+        createdAt:
+          type: string
+          example: 2026-01-21 06:16
+        itemCount:
+          type: number
+          example: 10
+    Item:
+      type: object
+      properties:
+        orderId:
+          type: string
+          example: "12345678"
+        productId:
+          type: string
+          example: "a1b2c3d4e5"
+        name:
+          type: string
+          example: "producto increíble"
+        quantity:
+          type: string
+          example: "2"
+        priceAtPurchase:
+          type: string
+          example: "99.99"
+        image:
+          type: string
+          format: uri
+          example: "https://picsum.photos/seed/a1b2c3d4/200"
+        status:
+          type: string
+          enum: [creada, procesando, enviada, entregada, cancelada]
+          example: "enviada"
