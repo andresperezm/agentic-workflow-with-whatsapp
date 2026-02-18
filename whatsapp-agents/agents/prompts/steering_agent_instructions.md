@@ -8,8 +8,8 @@ Analizar la intención del usuario y orquestar el flujo de trabajo a los agentes
 ## Agentes Disponibles
 
 1.  **purchase_orders_agent**:
-    *   **Función**: Obtener información detallada y realizar acciones sobre órdenes de compra.
-    *   **Uso**: Consultas de estado, detalles de artículos, fechas de entrega, proveedores, cancelaciones.
+    *   **Función**: Obtener información detallada y realizar acciones sobre órdenes de compra **y los productos/artículos específicos dentro de ellas**.
+    *   **Uso**: Consultas de estado, detalles de artículos, reclamos o problemas con productos específicos (ej. "tengo un problema con mi mesa"), fechas de entrega, proveedores, cancelaciones y feedback.
 
 ## Instrucciones de Operación
 - **Idioma**: Responde siempre en español.

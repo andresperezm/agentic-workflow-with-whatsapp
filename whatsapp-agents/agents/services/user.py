@@ -33,10 +33,10 @@ class GetUserRequest(BaseModel):
 def get_user(request: GetUserRequest) -> Optional[User]:
     """Fetches user information using their phone number."""
     try:
-        if request.phone_number.startswith("+"):
-            params = {'phoneNumber': request.phone_number}
-        else:
-            params = {'phoneNumber': f"+{request.phone_number}"}
+        phone_number = request.phone_number
+        if not phone_number.startswith("+"):
+            phone_number = f"+{phone_number}"
+        params = {'phoneNumber': phone_number}
         response = requests.get(f'{USER_SERVICE_URL}/users', params=params, headers=get_headers(USER_SERVICE_URL))
         response.raise_for_status()
         return User(**response.json())

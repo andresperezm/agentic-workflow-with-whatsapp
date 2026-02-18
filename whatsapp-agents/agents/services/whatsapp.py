@@ -3,7 +3,7 @@ import os
 import json
 import requests
 import google.auth
-from typing import Optional, List, Dict, Any, Union, Literal
+from typing import Optional, List, Dict, Any, Union, Literal, Tuple
 from pydantic import BaseModel, Field
 from .utils import get_secret
 
@@ -156,7 +156,11 @@ WHATSAPP_TOKEN = get_secret("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = get_secret("WHATSAPP_PHONE_NUMBER_ID")
 BASE_URL = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
-def send_message(payload: Dict[str, Any]) -> str:
+def send_message(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    is_enabled = os.environ.get('WHATSAPP_INTEGRATION_ENABLED', 'true').lower() == 'true'
+    if not is_enabled:
+        return False, "WhatsApp integration is not enabled."
+
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
@@ -164,14 +168,14 @@ def send_message(payload: Dict[str, Any]) -> str:
     try:
         response = requests.post(BASE_URL, headers=headers, json=payload)
         response.raise_for_status()
-        return "Message sent successfully"
+        return True, "Message sent successfully"
     except requests.exceptions.RequestException as e:
         error_msg = e.response.text if e.response else str(e)
         logger.error(f'Error sending WhatsApp message: {error_msg}')
-        return f"Error sending WhatsApp message: {error_msg}"
+        return False, f"Error sending WhatsApp message: {error_msg}"
 
 
-def send_audio_message(message: AudioMessage) -> str:
+def send_audio_message(message: AudioMessage) -> Tuple[bool, str]:
     """Sends an audio message to a WhatsApp user."""
     payload = {
         "messaging_product": "whatsapp",
@@ -182,7 +186,7 @@ def send_audio_message(message: AudioMessage) -> str:
     }
     return send_message(payload)
 
-def send_contact_message(message: ContactMessage) -> str:
+def send_contact_message(message: ContactMessage) -> Tuple[bool, str]:
     """Sends a contact message to a WhatsApp user."""
     payload = {
         "messaging_product": "whatsapp",
@@ -193,7 +197,7 @@ def send_contact_message(message: ContactMessage) -> str:
     }
     return send_message(payload)
 
-def send_document_message(message: DocumentMessage) -> str:
+def send_document_message(message: DocumentMessage) -> Tuple[bool, str]:
     """Sends a document message to a WhatsApp user."""
     payload = {
         "messaging_product": "whatsapp",
@@ -204,7 +208,7 @@ def send_document_message(message: DocumentMessage) -> str:
     }
     return send_message(payload)
 
-def send_image_message(message: ImageMessage) -> str:
+def send_image_message(message: ImageMessage) -> Tuple[bool, str]:
     """Sends an image message to a WhatsApp user."""
     payload = {
         "messaging_product": "whatsapp",
@@ -215,7 +219,7 @@ def send_image_message(message: ImageMessage) -> str:
     }
     return send_message(payload)
 
-def send_interactive_cta_button_message(message: InteractiveCtaButtonMessage) -> str:
+def send_interactive_cta_button_message(message: InteractiveCtaButtonMessage) -> Tuple[bool, str]:
     """Sends an interactive CTA button message to a WhatsApp user."""
     interactive = {
         "type": "cta_url",
@@ -236,7 +240,7 @@ def send_interactive_cta_button_message(message: InteractiveCtaButtonMessage) ->
     }
     return send_message(payload)
 
-def send_interactive_flow_message(message: InteractiveFlowMessage) -> str:
+def send_interactive_flow_message(message: InteractiveFlowMessage) -> Tuple[bool, str]:
     """Sends an interactive flow message to a WhatsApp user."""
     interactive = {
         "type": "flow",
@@ -257,7 +261,7 @@ def send_interactive_flow_message(message: InteractiveFlowMessage) -> str:
     }
     return send_message(payload)
 
-def send_interactive_list_message(message: InteractiveListMessage) -> str:
+def send_interactive_list_message(message: InteractiveListMessage) -> Tuple[bool, str]:
     """Sends an interactive list message to a WhatsApp user."""
     interactive = {
         "type": "list",
@@ -278,7 +282,7 @@ def send_interactive_list_message(message: InteractiveListMessage) -> str:
     }
     return send_message(payload)
 
-def send_interactive_reply_buttons_message(message: InteractiveReplyButtonsMessage) -> str:
+def send_interactive_reply_buttons_message(message: InteractiveReplyButtonsMessage) -> Tuple[bool, str]:
     """Sends an interactive reply buttons message to a WhatsApp user."""
     interactive = {
         "type": "button",
@@ -299,7 +303,7 @@ def send_interactive_reply_buttons_message(message: InteractiveReplyButtonsMessa
     }
     return send_message(payload)
 
-def send_location_message(message: LocationMessage) -> str:
+def send_location_message(message: LocationMessage) -> Tuple[bool, str]:
     """Sends a location message to a WhatsApp user."""
     payload = {
         "messaging_product": "whatsapp",
@@ -310,7 +314,7 @@ def send_location_message(message: LocationMessage) -> str:
     }
     return send_message(payload)
 
-def send_video_message(message: VideoMessage) -> str:
+def send_video_message(message: VideoMessage) -> Tuple[bool, str]:
     """Sends a video message to a WhatsApp user."""
     payload = {
         "messaging_product": "whatsapp",
@@ -321,7 +325,7 @@ def send_video_message(message: VideoMessage) -> str:
     }
     return send_message(payload)
 
-def send_text_message(message: TextMessage) -> str:
+def send_text_message(message: TextMessage) -> Tuple[bool, str]:
     """Sends a text message to a WhatsApp user."""
     payload = {
         "messaging_product": "whatsapp",

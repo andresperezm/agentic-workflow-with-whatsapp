@@ -21,60 +21,69 @@ agent_path = os.path.dirname(os.path.abspath(__file__))
 
 # Callbacks
 def before_agent_modifier(callback_context: CallbackContext) -> Optional[types.Content]:
+    user_phone_number = None
     if callback_context.state.get('user_phone_number') is None:
         user_phone_number = callback_context.user_id
-        # for local testing
         if user_phone_number == "user":
-            user_phone_number = os.environ.get('DEFAULT_PHONE_NUMBER')
+            user_phone_number = os.environ.get('DEFAULT_PHONE_NUMBER') # for local testing
         callback_context.state['user_phone_number'] = user_phone_number
+    else:
+        user_phone_number = callback_context.state.get('user_phone_number')
 
-    if callback_context.state.get('user_email') is None:
-        user = get_user(GetUserRequest(phone_number=user_phone_number))
-        if user:
-            if callback_context.state.get('user_email') is None:
-                callback_context.state['user_email'] = user.userEmail
-            if callback_context.state.get('user_name') is None:
-                callback_context.state['user_name'] = user.userName
+    if not user_phone_number:
+        logger.error("User phone number not found")
+        return None
+
+    user_email = callback_context.state.get('user_email')
+    user_name = callback_context.state.get('user_name')
+    if user_email is None:
+        userInfo = get_user(GetUserRequest(phone_number=user_phone_number))
+        if userInfo:
+            callback_context.state['user_email'] = userInfo.userEmail
+            callback_context.state['user_name'] = userInfo.userName
+        else:
+            success, _ = send_text_message(TextMessage(
+                to=user_phone_number,
+                text=TextObject(body="No hemos encontrado tu usuario. Por favor, regístrate en nuestra página web.")
+            ))
+            callback_context.state['whatsapp_message_sent'] = success
+            logger.error(f"User not found: {user_phone_number}")
 
     return None
 
-def modify_output_after_agent(callback_context: CallbackContext) -> Optional[types.Content]:
-    if callback_context.state.get('message_sent_by_tool'):
-        return None
-    else:
-        send_text_message(TextMessage(
-            to=tool_context.state.get('user_phone_number'),
-            text=TextObject(body=callback_context.response)
-        ))
-        return None
 
 def simple_after_model_modifier(callback_context: CallbackContext, llm_response: LlmResponse) -> Optional[LlmResponse]:
     """Inspects/modifies the LLM response after it's received."""
-    original_text = ""
     if llm_response.content and llm_response.content.parts:
         if llm_response.content.parts[0].text:
-            original_text = llm_response.content.parts[0].text
+            text_response = llm_response.content.parts[0].text
+            logger.info(f"Response text: {text_response}")
+            if not callback_context.state.get('whatsapp_message_sent'):
+                logger.info("Sending text response via WhatsApp")
+                user_phone_number = get_user_phone_number(callback_context)
+                if user_phone_number:
+                    success, message = send_text_message(TextMessage(to=user_phone_number, text=TextObject(body=text_response)))
+                    if not success:
+                        logger.error(f"Cannot send text: {message}")
+                else:
+                    logger.error("Cannot send text: user_phone_number not in state")
+            else:
+               # Reset state for next turn
+               callback_context.state['whatsapp_message_sent'] = False
         elif llm_response.content.parts[0].function_call:
-             logger.info("No text modification")
+             logger.info(f"Using tool: {llm_response.content.parts[0].function_call.name}")
         else:
-            logger.info("No text found")
+            logger.warning("No text or function call found in response")
     elif llm_response.error_message:
-        logger.info("Agent error")
+        logger.error(f"Agent error: {llm_response.error_message}")
     else:
-        logger.info("Empty LlmResponse.")
-    if not callback_context.state.get('whatsapp_message_sent'):
-        callback_context.state['whatsapp_message_sent'] = False
-        logger.info("Sending message to whatsapp")
-        send_text_message(TextMessage(
-            to=callback_context.state.get('user_phone_number'),
-            text=TextObject(body=original_text)
-        ))
-        logger.info("Message sent to whatsapp")
+        logger.warning("Empty LlmResponse.")
     return None
 
 # --- Tools ---
 
 def get_user_email(tool_context: ToolContext) -> str:
+    """Gets the user email from the tool context."""
     return tool_context.state.get('user_email')
 
 def get_user_phone_number(tool_context: ToolContext) -> str:
@@ -96,8 +105,15 @@ def get_date() -> Dict[str, Any]:
 def get_user_orders(tool_context: ToolContext) -> Dict[str, Any]:
     email = get_user_email(tool_context)
     orders = get_orders(GetOrdersRequest(email=email))
+    if not orders:
+        success, _ = send_text_message(TextMessage(
+            to=get_user_phone_number(tool_context),
+            text=TextObject(body="No hemos encontrado órdenes de compra para tu usuario.")
+        ))
+        tool_context.state['whatsapp_message_sent'] = success
+        return {"message": "No hemos encontrado órdenes de compra para tu usuario."}
     message = InteractiveListMessage(
-        to=tool_context.state.get('user_phone_number'),
+        to=get_user_phone_number(tool_context),
         header=InteractiveHeader(
             type="text",
             text="Órdenes de compra"
@@ -125,25 +141,26 @@ def get_user_orders(tool_context: ToolContext) -> Dict[str, Any]:
             ],
         ),
     )
-    send_interactive_list_message(message) 
+    success, _ = send_interactive_list_message(message) 
+    tool_context.state['whatsapp_message_sent'] = success
     return {"orders": orders}
 
 def get_user_items(tool_context: ToolContext) -> Dict[str, Any]:
     email = get_user_email(tool_context)
     items = get_items(GetItemsRequest(email=email))
     if not items:
-        # Send a text message instead if no items found
-        send_text_message(TextMessage(
-            to=tool_context.state.get('user_phone_number'),
+        success, _ = send_text_message(TextMessage(
+            to=get_user_phone_number(tool_context),
             text=TextObject(body="No se encontraron items recientes asociados a tu cuenta.")
         ))
-        return {"items": []}
+        tool_context.state['whatsapp_message_sent'] = success
+        return {"message": "No se encontraron items recientes asociados a tu cuenta."}
 
     # Limit to 10 items
     items = items[:10]
 
     message = InteractiveListMessage(
-        to=tool_context.state.get('user_phone_number'),
+        to=get_user_phone_number(tool_context),
         header=InteractiveHeader(
             type="text",
             text="Items de compra"
@@ -171,7 +188,8 @@ def get_user_items(tool_context: ToolContext) -> Dict[str, Any]:
             ],
         ),
     )   
-    send_interactive_list_message(message) 
+    success, _ = send_interactive_list_message(message) 
+    tool_context.state['whatsapp_message_sent'] = success
     return {"items": items}
 
 def get_user_item(product_id: str, tool_context: ToolContext) -> Dict[str, Any]:
@@ -179,11 +197,12 @@ def get_user_item(product_id: str, tool_context: ToolContext) -> Dict[str, Any]:
     item = get_item(GetItemRequest(email=email, product_id=product_id))
 
     if not item:
-        send_text_message(TextMessage(
-            to=tool_context.state.get('user_phone_number'),
+        success, _ = send_text_message(TextMessage(
+            to=get_user_phone_number(tool_context),
             text=TextObject(body=f"No se encontraron detalles del item.")
         ))
-        return {"error": "Item not found"}
+        tool_context.state['whatsapp_message_sent'] = success
+        return {"message": "No se encontraron detalles del item."}
 
     if item.image:
         header = InteractiveHeader(
@@ -198,13 +217,10 @@ def get_user_item(product_id: str, tool_context: ToolContext) -> Dict[str, Any]:
 
     message_body = f"Item: {item.name}\nEstado: {item.status}\nPrecio: ${item.priceAtPurchase}"
 
-    # Use reply button for Add Feedback
-    # Note: Assuming orderId is available on the item. If not, maybe use productId. But user asked for add_feedback.
-    # The ID must be unique. Let's encode the action.
     button_id = f"add_feedback_{item.orderId}_{item.productId}" if item.orderId else f"add_feedback_{item.productId}"
 
     message = InteractiveReplyButtonsMessage(
-        to=tool_context.state.get('user_phone_number'),
+        to=get_user_phone_number(tool_context),
         header=header,
         body=InteractiveBody(text=message_body),
         action=InteractiveAction(
@@ -218,7 +234,8 @@ def get_user_item(product_id: str, tool_context: ToolContext) -> Dict[str, Any]:
             ]
         )
     )
-    send_interactive_reply_buttons_message(message)
+    success, _ = send_interactive_reply_buttons_message(message)
+    tool_context.state['whatsapp_message_sent'] = success
 
     return {"item": item}
 
@@ -227,16 +244,17 @@ def get_user_order(order_id: str, tool_context: ToolContext) -> Dict[str, Any]:
     order = get_order(GetOrderRequest(email=email, order_id=order_id))
 
     if not order:
-        send_text_message(TextMessage(
-            to=tool_context.state.get('user_phone_number'),
+        success, _ = send_text_message(TextMessage(
+            to=get_user_phone_number(tool_context),
             text=TextObject(body="No se encontraron detalles de la orden.")
         ))
-        return {"error": "Order not found"}
+        tool_context.state['whatsapp_message_sent'] = success
+        return {"message": "No se encontraron detalles de la orden."}
 
     message_body = f"Orden: {order.orderId}\nEstado: {order.status}\nTotal: ${order.totalAmount}\nItems: {order.itemCount}"
 
     message = InteractiveReplyButtonsMessage(
-        to=tool_context.state.get('user_phone_number'),
+        to=get_user_phone_number(tool_context),
         header=InteractiveHeader(
             type="text",
             text="Detalles de la orden"
@@ -259,55 +277,62 @@ def get_user_order(order_id: str, tool_context: ToolContext) -> Dict[str, Any]:
             ]
         )
     )
-    send_interactive_reply_buttons_message(message)
+    success, _ = send_interactive_reply_buttons_message(message)
+    tool_context.state['whatsapp_message_sent'] = success
     return {"order": order}
 
 def cancel_user_order(order_id: str, tool_context: ToolContext) -> Dict[str, Any]:
     email = get_user_email(tool_context)
     result = cancel_order(CancelOrderRequest(email=email, order_id=order_id))
     if result.get('error'):
-         send_text_message(TextMessage(
-            to=tool_context.state.get('user_phone_number'),
+         success, _ = send_text_message(TextMessage(
+            to=get_user_phone_number(tool_context),
             text=TextObject(body=f"No se pudo cancelar la orden: {result.get('error')}")
         ))
+         tool_context.state['whatsapp_message_sent'] = success
          return result
     
-    send_text_message(TextMessage(
-        to=tool_context.state.get('user_phone_number'),
+    success, _ = send_text_message(TextMessage(
+        to=get_user_phone_number(tool_context),
         text=TextObject(body=f"La orden {order_id} ha sido cancelada.")
     ))
+    tool_context.state['whatsapp_message_sent'] = success
     return result
 
 def add_user_feedback(order_id: str, feedback: str, tool_context: ToolContext) -> Dict[str, Any]:
     email = get_user_email(tool_context)
     result = add_feedback(AddFeedbackRequest(email=email, order_id=order_id, feedback=feedback))
     if result.get('error'):
-        send_text_message(TextMessage(
-            to=tool_context.state.get('user_phone_number'),
+        success, _ = send_text_message(TextMessage(
+            to=get_user_phone_number(tool_context),
             text=TextObject(body=f"No se pudo agregar el feedback: {result.get('error')}")
         ))
+        tool_context.state['whatsapp_message_sent'] = success
         return result
 
-    send_text_message(TextMessage(
-        to=tool_context.state.get('user_phone_number'),
+    success, _ = send_text_message(TextMessage(
+        to=get_user_phone_number(tool_context),
         text=TextObject(body="¡Gracias por tus comentarios!")
     ))
+    tool_context.state['whatsapp_message_sent'] = success
     return result
 
 def remove_user_item(order_id: str, product_id: str, tool_context: ToolContext) -> Dict[str, Any]:
     email = get_user_email(tool_context)
     result = remove_item(RemoveItemRequest(email=email, order_id=order_id, product_id=product_id))
     if result.get('error'):
-        send_text_message(TextMessage(
-            to=tool_context.state.get('user_phone_number'),
+        success, _ = send_text_message(TextMessage(
+            to=get_user_phone_number(tool_context),
             text=TextObject(body=f"No se pudo remover el item: {result.get('error')}")
         ))
+        tool_context.state['whatsapp_message_sent'] = success
         return result
 
-    send_text_message(TextMessage(
-        to=tool_context.state.get('user_phone_number'),
+    success, _ = send_text_message(TextMessage(
+        to=get_user_phone_number(tool_context),
         text=TextObject(body=f"El item {product_id} ha sido removido de la orden {order_id}.")
     ))
+    tool_context.state['whatsapp_message_sent'] = success
     return result
 
 # Agents
@@ -329,8 +354,8 @@ purchase_orders_agent = LlmAgent(
     instruction=purchase_orders_agent_prompt,
     tools=[
         get_date,
-        get_user_email,
         get_user_phone_number,
+        get_user_email,
         get_user_name,
         get_user_orders,
         get_user_items,
@@ -359,6 +384,11 @@ root_agent = LlmAgent(
     name=STEERING_AGENT_NAME,
     model=STEERING_AGENT_MODEL,
     instruction=steering_agent_prompt,
-    sub_agents=[purchase_orders_agent],
-    after_model_callback=simple_after_model_modifier
+    tools=[
+        get_date,
+        get_user_phone_number,
+        get_user_email,
+        get_user_name
+    ],
+    sub_agents=[purchase_orders_agent]
 )
