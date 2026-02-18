@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "PO Service (Debug)",
+      "name": "Agents (Debug)",
       "type": "debugpy",
       "request": "launch",
       "program": "main.py",
