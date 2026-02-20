@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "purchase-orders-service"
+		},
+		{
+			"path": "dialogflow-cx-to-agent-engine-forwarder"
 		}
 	]
 }

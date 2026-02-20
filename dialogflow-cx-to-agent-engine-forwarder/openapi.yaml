@@ -1,0 +1,80 @@
+openapi: 3.0.3
+info:
+  title: Dialogflow CX to Agent Engine Forwarder
+  description: A service that forwards requests from Dialogflow CX to Vertex AI Agent Engine.
+  version: 1.0.0
+servers:
+  - url: https://dialogflow-cx-to-agent-engine-forwarder-63621244483.us-central1.run.app
+    description: Cloud Run server
+paths:
+  /message:
+    post:
+      summary: Forward a message to Agent Engine
+      description: Receives a payload from Dialogflow CX (or similar), forwards it to Vertex AI Agent Engine, and manages the session.
+      operationId: forwardMessage
+      requestBody:
+        description: The message payload containing user utterance and session details.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DialogflowCXRequest'
+      responses:
+        '200':
+          description: Successfully forwarded the message.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        '400':
+          description: Bad request or error processing the message.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Error processing request: ..."
+components:
+  schemas:
+    DialogflowCXRequest:
+      type: object
+      required:
+        - session_id
+        - user_utterance
+        - agent_id
+        - project_id
+        - location_id
+      properties:
+        session_id:
+          type: string
+          description: Unique identifier for the session.
+          example: "test-session-001"
+        user_utterance:
+          type: string
+          description: The text message sent by the user.
+          example: "Hello, world!"
+        agent_id:
+          type: string
+          description: The caller's Agent ID (e.g. Dialogflow CX Agent ID).
+
+          example: "projects/123/locations/us-central1/agents/456"
+        project_id:
+          type: string
+          description: The caller's Google Cloud Project ID.
+
+          example: "my-gcp-project"
+        location_id:
+          type: string
+          description: The caller's Google Cloud Location ID.
+
+          example: "us-central1"
+        user_phone:
+          type: string
+          description: The user's phone number, used for session management.
+          example: "+15551234567"
