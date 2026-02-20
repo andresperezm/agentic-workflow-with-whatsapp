@@ -1,70 +1,54 @@
-import os
-import json
 import logging
-import requests
 import hmac
 import hashlib
-from flask import Flask, request, jsonify, abort
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from flask import Flask, request, jsonify, abort
 from google.cloud.dialogflowcx_v3.services.sessions.client import SessionsClient
-from google.cloud.dialogflowcx_v3.types.session import DetectIntentRequest, TextInput, QueryInput
+from google.cloud.dialogflowcx_v3.types.session import DetectIntentRequest, TextInput, QueryInput, QueryParameters
 import vertexai
 from vertexai import agent_engines
-import asyncio
-from dotenv import load_dotenv
+from google.protobuf import struct_pb2
+import requests
+
 from whatsapp_models import parse_webhook_payload
-
-
-# Load local environment variables if present
-load_dotenv()
-
+from config import Config
 
 # Configure logging
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
-logging.basicConfig(level=LOG_LEVEL)
+logging.basicConfig(level=Config.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Environment variables
-PORT = int(os.environ.get('PORT', 8080))
-ROUTING_TARGET = os.environ.get('ROUTING_TARGET', 'AGENT_ENGINE')
-
-PROJECT_ID = os.environ.get('PROJECT_ID')
-LOCATION = os.environ.get('LOCATION', 'us-central1')
-AGENT_ID = os.environ.get('AGENT_ID')
-AGENT_LANGUAGE_CODE = os.environ.get('AGENT_LANGUAGE_CODE', 'en')
-
-# WhatsApp API
-WHATSAPP_VERIFY_TOKEN = os.environ.get('WHATSAPP_VERIFY_TOKEN')
-WHATSAPP_APP_SECRET = os.environ.get('WHATSAPP_APP_SECRET')
-SEND_WHATSAPP_RESPONSE = os.environ.get('SEND_WHATSAPP_RESPONSE', 'TRUE').upper() == 'TRUE'
-WHATSAPP_API_VERSION = os.environ.get('WHATSAPP_API_VERSION', 'v24.0')
-WHATSAPP_API_TOKEN = os.environ.get('WHATSAPP_API_TOKEN')
-
-
-if not PROJECT_ID:
-    logger.error("Could not determine PROJECT_ID. Please ensure PROJECT_ID is set.")
+# Verify critical config
+try:
+    Config.validate()
+except ValueError as e:
+    logger.error(f"Configuration Error: {e}")
     exit(1)
 
-logger.info(f"Using Project ID: {PROJECT_ID} and Region: {LOCATION} for loading secrets")
-
+logger.info(f"Using Project ID: {Config.PROJECT_ID} and Region: {Config.LOCATION}")
 
 # Global clients (Lazy loading)
 _dialogflow_session_client = None
 
+# ThreadPool for handling webhook tasks
+# Adjust max_workers based on expected load and CPU/Memory limits.
+# For Cloud Run with 1 vCPU, a small number like 5-10 is often sufficient for IO-bound tasks.
+executor = ThreadPoolExecutor(max_workers=10)
+
 def get_vertex_agent():
-    if not AGENT_ID:
+    if not Config.AGENT_ID:
         logger.error("AGENT_ID environment variable not set")
         raise ValueError("AGENT_ID not set")
 
-    agent_engine_resource_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{AGENT_ID}"
+    agent_engine_resource_name = f"projects/{Config.PROJECT_ID}/locations/{Config.LOCATION}/reasoningEngines/{Config.AGENT_ID}"
     
     logger.info(f"Initializing Vertex AI Agent Engine: {agent_engine_resource_name}")
     try:
         # Always create a fresh client to ensure it binds to the current (background) asyncio loop
-        vertex_client = vertexai.Client(project=PROJECT_ID, location=LOCATION)
+        vertex_client = vertexai.Client(project=Config.PROJECT_ID, location=Config.LOCATION)
         return vertex_client.agent_engines.get(name=agent_engine_resource_name)
     except Exception as e:
         logger.error(f"Failed to get agent {agent_engine_resource_name}: {e}")
@@ -75,15 +59,14 @@ def get_dialogflow_session_client():
     if _dialogflow_session_client:
         return _dialogflow_session_client
 
-    if not AGENT_ID:
+    if not Config.AGENT_ID:
         logger.error("AGENT_ID environment variable not set (required for Dialogflow Agent ID)")
         raise ValueError("AGENT_ID not set")
 
     logger.info("Initializing Dialogflow CX Session Client")
-    api_endpoint = f"{LOCATION}-dialogflow.googleapis.com"
+    api_endpoint = f"{Config.LOCATION}-dialogflow.googleapis.com"
     _dialogflow_session_client = SessionsClient(client_options={"api_endpoint": api_endpoint})
     return _dialogflow_session_client
-
 
 
 def mask_phone_number(phone_number: str) -> str:
@@ -92,11 +75,11 @@ def mask_phone_number(phone_number: str) -> str:
         return "****"
     return f"*****{phone_number[-4:]}"
 
-def validate_signature(payload, signature):
+def validate_signature(payload: bytes, signature: str) -> bool:
     """
     Validates the X-Hub-Signature-256 header.
     """
-    if not WHATSAPP_APP_SECRET:
+    if not Config.WHATSAPP_APP_SECRET:
         # Check if running in Cloud Run (K_SERVICE is always set in Cloud Run)
         is_cloud_run = os.environ.get('K_SERVICE') is not None
         
@@ -111,29 +94,29 @@ def validate_signature(payload, signature):
         return False
         
     expected_signature = hmac.new(
-        bytes(WHATSAPP_APP_SECRET, 'latin-1'),
+        bytes(Config.WHATSAPP_APP_SECRET, 'latin-1'),
         msg=payload,
         digestmod=hashlib.sha256
     ).hexdigest()
     
     return hmac.compare_digest(f'sha256={expected_signature}', signature)
 
-def send_whatsapp_message(phone_number_id, to, message_body):
+def send_whatsapp_message(phone_number_id: str, to: str, message_body: str) -> None:
     """
     Sends a text message to a user via WhatsApp Graph API.
     """
-    if not SEND_WHATSAPP_RESPONSE:
+    if not Config.SEND_WHATSAPP_RESPONSE:
         logger.info(f"[{to}] Skipping WhatsApp message delivery")
         logger.debug(f"[{to}] WhatsApp message: {message_body}")
         return
 
-    if not WHATSAPP_API_TOKEN:
+    if not Config.WHATSAPP_API_TOKEN:
         logger.error("WHATSAPP_API_TOKEN not set. Cannot send message.")
         return
 
-    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{phone_number_id}/messages"
+    url = f"https://graph.facebook.com/{Config.WHATSAPP_API_VERSION}/{phone_number_id}/messages"
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_API_TOKEN}",
+        "Authorization": f"Bearer {Config.WHATSAPP_API_TOKEN}",
         "Content-Type": "application/json"
     }
     data = {
@@ -151,17 +134,17 @@ def send_whatsapp_message(phone_number_id, to, message_body):
     except Exception as e:
         logger.error(f"Failed to send message to {to}: {e}")
 
-def mark_message_as_read(phone_number_id, message_id):
+def mark_message_as_read(phone_number_id: str, message_id: str) -> None:
     """
     Marks a message as read.
     """
-    if not WHATSAPP_API_TOKEN:
+    if not Config.WHATSAPP_API_TOKEN:
         logger.error("WHATSAPP_API_TOKEN not set. Cannot mark message as read.")
         return
 
-    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{phone_number_id}/messages"
+    url = f"https://graph.facebook.com/{Config.WHATSAPP_API_VERSION}/{phone_number_id}/messages"
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_API_TOKEN}",
+        "Authorization": f"Bearer {Config.WHATSAPP_API_TOKEN}",
         "Content-Type": "application/json"
     }
     data = {
@@ -190,7 +173,7 @@ def webhook_message():
         challenge = request.args.get('hub.challenge')
 
         if mode and token:
-            if mode == 'subscribe' and token == WHATSAPP_VERIFY_TOKEN:
+            if mode == 'subscribe' and token == Config.WHATSAPP_VERIFY_TOKEN:
                 logger.info("Webhook verified successfully.")
                 return challenge, 200
             else:
@@ -208,9 +191,8 @@ def webhook_message():
     try:
         body = request.get_json()
         
-        # Start background processing
-        thread = threading.Thread(target=process_webhook_payload, args=(body,))
-        thread.start()
+        # Submit task to ThreadPoolExecutor
+        executor.submit(process_webhook_payload, body)
         
         # Return 200 OK immediately
         return 'OK', 200
@@ -219,7 +201,7 @@ def webhook_message():
         logger.error(f'Error handling webhook POST: {e}', exc_info=True)
         return 'Internal Server Error', 500
 
-def process_webhook_payload(body):
+def process_webhook_payload(body: dict) -> None:
     """
     Processes the webhook payload in a background thread.
     """
@@ -259,20 +241,14 @@ def process_webhook_payload(body):
                                 msg_body = msg.button.payload or msg.button.text
                             
                             if msg_body:
-                                logger.info(f"[{masked_phone}] Routing message to '{ROUTING_TARGET}'")
-                                if ROUTING_TARGET == 'AGENT_ENGINE':
-                                    logger.info(f"[{masked_phone}] Offloading forward_to_adk_agent_engine to background thread...")
-                                    # Run synchronous function in a separate thread to avoid blocking Flask
-                                    t = threading.Thread(
-                                        target=forward_to_adk_agent_engine,
-                                        args=(user_phone_number, msg_body, phone_number_id)
-                                    )
-                                    t.start()
-                                    logger.info(f"[{masked_phone}] Background thread started.")
-                                elif ROUTING_TARGET == 'DIALOGFLOW':
+                                logger.info(f"[{masked_phone}] Routing message to '{Config.ROUTING_TARGET}'")
+                                if Config.ROUTING_TARGET == 'AGENT_ENGINE':
+                                    # Already in a background thread from ThreadPool, call directly
+                                    forward_to_adk_agent_engine(user_phone_number, msg_body, phone_number_id)
+                                elif Config.ROUTING_TARGET == 'DIALOGFLOW':
                                     forward_to_dialogflow_cx(user_phone_number, msg_body, phone_number_id)
                                 else:
-                                    logger.warning(f"[{masked_phone}] Unknown ROUTING_TARGET: '{ROUTING_TARGET}'")
+                                    logger.warning(f"[{masked_phone}] Unknown ROUTING_TARGET: '{Config.ROUTING_TARGET}'")
                             else:
                                 logger.warning(f"[{masked_phone}] Unsupported or empty message body for type: {msg.type}")
 
@@ -282,28 +258,21 @@ def process_webhook_payload(body):
         logger.error(f"Error in background processing: {e}", exc_info=True)
 
 
-
-from google.protobuf import struct_pb2
-from google.cloud.dialogflowcx_v3.types.session import DetectIntentRequest, TextInput, QueryInput, QueryParameters
-
-# ... (imports continue)
-
-
-def forward_to_dialogflow_cx(user_phone_number: str, query: str, phone_number_id: str):
+def forward_to_dialogflow_cx(user_phone_number: str, query: str, phone_number_id: str) -> None:
     """
     Detects Intent in Dialogflow CX and sends response back to WhatsApp.
     """
     try:
         session_client = get_dialogflow_session_client()
         session_path = session_client.session_path(
-            project=PROJECT_ID,
-            location=LOCATION,
-            agent=AGENT_ID,
+            project=Config.PROJECT_ID,
+            location=Config.LOCATION,
+            agent=Config.AGENT_ID,
             session=user_phone_number
         )
 
         text_input = TextInput(text=query)
-        query_input = QueryInput(text=text_input, language_code=AGENT_LANGUAGE_CODE)
+        query_input = QueryInput(text=text_input, language_code=Config.AGENT_LANGUAGE_CODE)
 
         # Construct QueryParameters with user phone
         query_params = QueryParameters()
@@ -350,17 +319,11 @@ def forward_to_dialogflow_cx(user_phone_number: str, query: str, phone_number_id
         logger.error(f'Dialogflow CX Error: {e}', exc_info=True)
 
 
-
-
-async def forward_to_adk_agent_engine_dummy():
-    # Placeholder to keep imports valid if needed, or just remove
-    pass
-
-def forward_to_adk_agent_engine(user_phone_number: str, query: str, phone_number_id: str):
+def forward_to_adk_agent_engine(user_phone_number: str, query: str, phone_number_id: str) -> None:
     """
     Queries the Vertex AI Agent Engine (Reasoning Engine) and sends response back to WhatsApp.
     Ensures only one session exists per user (phone number) by deleting older sessions.
-    Runs SYNCHRONOUSLY in a background thread.
+    Runs SYNCHRONOUSLY.
     """
     max_retries = 1
     for attempt in range(max_retries + 1):
@@ -440,4 +403,4 @@ def forward_to_adk_agent_engine(user_phone_number: str, query: str, phone_number
 
 if __name__ == '__main__':
     # Used for local development only
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    app.run(host='0.0.0.0', port=Config.PORT, debug=True)
