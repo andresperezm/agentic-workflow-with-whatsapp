@@ -120,7 +120,7 @@ def po_after_model_callback(callback_context: CallbackContext, llm_response: Llm
                                     rows=[
                                         InteractiveActionSectionRow(
                                             id=f"{item.get('productId', '')}",
-                                            title=f"{item.get('name', '')[:21]}..." if len(item.get('name', '')) > 24 else item.get('name', ''),
+                                            title=f"Producto: {item.get('name', '')[:11]}..." if len(item.get('name', '')) > 14 else f"Producto: {item.get('name', '')}",
                                             description=f"Estado: {item.get('status', '')} | Cantidad: {item.get('quantity', 0)} | Precio: ${item.get('priceAtPurchase', 0)}"[:72],
                                         )
                                         for item in items
@@ -157,10 +157,20 @@ def po_after_model_callback(callback_context: CallbackContext, llm_response: Llm
 
             elif last_tool_name == 'get_user_order' and last_tool_result and last_tool_result.get('order'):
                 order = last_tool_result.get('order')
+                # Format the order details
+                items_desc = "\n".join([f"- {i.get('quantity')}x {i.get('name')} (${i.get('priceAtPurchase')})" for i in order.get('items', [])])
+                order_details = (
+                    f"Orden: {order.get('orderId')}\n"
+                    f"Estado: {order.get('status')}\n"
+                    f"Fecha: {order.get('createdAt', '')[:10] if order.get('createdAt') else 'N/A'}\n"
+                    f"Total: ${order.get('totalAmount')}\n"
+                    f"Items:\n{items_desc}"
+                )
+                
                 message = InteractiveReplyButtonsMessage(
                     to=user_phone_number,
                     header=InteractiveHeader(type="text", text="Detalles de la orden"),
-                    body=InteractiveBody(text='¿Qué deseas hacer con esta orden?'),
+                    body=InteractiveBody(text=order_details),
                     action=InteractiveAction(
                         buttons=[
                             InteractiveActionReplyButton(
