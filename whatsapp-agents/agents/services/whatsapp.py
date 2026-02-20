@@ -93,6 +93,19 @@ class InteractiveAction(BaseModel):
     name: Optional[str] = None # For CTA URL (cta_url) or Flow (flow)
     parameters: Optional[Dict[str, Any]] = None # For CTA URL or Flow
 
+class InteractiveCarouselCardHeader(BaseModel):
+    type: Literal["image", "video"]
+    image: Optional[MediaObject] = None
+    video: Optional[MediaObject] = None
+
+class InteractiveCarouselCard(BaseModel):
+    header: InteractiveCarouselCardHeader
+    body: Optional[InteractiveBody] = None
+    action: InteractiveAction
+
+class InteractiveCarousel(BaseModel):
+    cards: List[InteractiveCarouselCard]
+
 # --- Models ---
 
 class AudioMessage(BaseModel):
@@ -151,10 +164,16 @@ class TextMessage(BaseModel):
     to: str = Field(..., description="The phone number of the recipient.")
     text: TextObject
 
+class InteractiveCarouselMessage(BaseModel):
+    to: str = Field(..., description="The phone number of the recipient.")
+    body: InteractiveBody
+    carousel: InteractiveCarousel
 
-WHATSAPP_TOKEN = get_secret("WHATSAPP_TOKEN")
+
+WHATSAPP_API_TOKEN = get_secret("WHATSAPP_API_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = get_secret("WHATSAPP_PHONE_NUMBER_ID")
-BASE_URL = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+WHATSAPP_API_VERSION = os.environ.get('WHATSAPP_API_VERSION', 'v24.0')
+BASE_URL = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
 def send_message(payload: Dict[str, Any]) -> Tuple[bool, str]:
     is_enabled = os.environ.get('WHATSAPP_INTEGRATION_ENABLED', 'true').lower() == 'true'
@@ -162,7 +181,7 @@ def send_message(payload: Dict[str, Any]) -> Tuple[bool, str]:
         return False, "WhatsApp integration is not enabled."
 
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Authorization": f"Bearer {WHATSAPP_API_TOKEN}",
         "Content-Type": "application/json"
     }
     try:
@@ -171,7 +190,7 @@ def send_message(payload: Dict[str, Any]) -> Tuple[bool, str]:
         return True, "Message sent successfully"
     except requests.exceptions.RequestException as e:
         error_msg = e.response.text if e.response else str(e)
-        logger.error(f'Error sending WhatsApp message: {error_msg}')
+        logger.error(f'Error sending WhatsApp message: {error_msg} | Payload: {json.dumps(payload)}')
         return False, f"Error sending WhatsApp message: {error_msg}"
 
 
@@ -251,6 +270,25 @@ def send_interactive_flow_message(message: InteractiveFlowMessage) -> Tuple[bool
         interactive["header"] = message.header.model_dump(exclude_none=True)
     if message.footer:
         interactive["footer"] = message.footer.model_dump(exclude_none=True)
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": message.to,
+        "type": "interactive",
+        "interactive": interactive
+    }
+    return send_message(payload)
+
+def send_interactive_carousel_message(message: InteractiveCarouselMessage) -> Tuple[bool, str]:
+    """Sends an interactive carousel message to a WhatsApp user."""
+    interactive = {
+        "type": "carousel",
+        "body": message.body.model_dump(exclude_none=True),
+        "carousel": {
+            "cards": [card.model_dump(exclude_none=True) for card in message.carousel.cards]
+        }
+    }
 
     payload = {
         "messaging_product": "whatsapp",

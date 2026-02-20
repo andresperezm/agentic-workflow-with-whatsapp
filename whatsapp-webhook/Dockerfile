@@ -15,9 +15,7 @@ WORKDIR /app
 # Copy dependency files
 COPY pyproject.toml ./
 
-# Install dependencies
-# We remove --frozen to allow resolving dependencies from public PyPI
-# instead of relying on the lockfile generated in a custom environment.
+# Install dependencies using public PyPI (ignoring local tainted lockfile)
 RUN uv sync --no-cache
 
 # Copy application code

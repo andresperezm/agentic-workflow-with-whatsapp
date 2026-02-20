@@ -932,7 +932,7 @@ requires-dist = [
     { name = "flask", specifier = ">=3.1.2" },
     { name = "google-cloud-aiplatform", specifier = ">=1.137.0" },
     { name = "google-cloud-dialogflow-cx", specifier = ">=2.3.0" },
-    { name = "gunicorn", specifier = ">=25.1.0" },
+    { name = "gunicorn", specifier = ">=21.2.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "python-dotenv", specifier = "==1.2.1" },
 ]

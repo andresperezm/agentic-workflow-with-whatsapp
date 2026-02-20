@@ -1,53 +1,102 @@
-# WhatsApp to Dialogflow CX Webhook
+# WhatsApp to Dialogflow CX / Agent Engine Webhook
 
-A Node.js service designed to run on Google Cloud Run. It bridges WhatsApp Cloud API and Dialogflow CX to provide an automated conversational experience.
+A Python Flask service designed to run on Google Cloud Run. It bridges WhatsApp Cloud API with either **Dialogflow CX** or **Vertex AI Agent Engine** to provide an automated conversational experience.
 
 ## Features
-- WhatsApp text message ingestion via Webhook.
-- Integration to Dialogflow CX `DetectIntent` API.
-- Replies back out to WhatsApp Graph API using the Dialogflow CX response text.
-- Packaged as a Docker container, ready for Cloud Run.
+- **WhatsApp Integration**: Ingests text and interactive messages via Webhook.
+- **Routing Logic**: Routes messages to either Dialogflow CX or Agent Engine based on configuration.
+- **Secure Configuration**: Uses Google Cloud Secret Manager for sensitive configuration.
+- **Cloud Run Ready**: Packaged with Docker, ready for serverless deployment.
+
+## Prerequisite: GCP Configuration
+
+This service uses **Google Cloud Secret Manager** to store configuration. You must create the following secrets in your Google Cloud Project.
+
+### 1. Enable APIs
+Ensure the following APIs are enabled in your project:
+```bash
+gcloud services enable secretmanager.googleapis.com run.googleapis.com
+```
+
+### 2. Create Configuration Secrets
+You need to create two secrets containing YAML configuration.
+
+#### Secret: `whatsapp-webhook-dialogflow-config`
+Create a file named `dialogflow.yaml` with your Dialogflow info:
+```yaml
+project_id: "YOUR_PROJECT_ID"
+location: "us-central1"
+agent_id: "YOUR_AGENT_ID"
+language_code: "en" 
+```
+
+Upload it to Secret Manager:
+```bash
+gcloud secrets create whatsapp-webhook-dialogflow-config --replication-policy="automatic"
+gcloud secrets versions add whatsapp-webhook-dialogflow-config --data-file="dialogflow.yaml"
+```
+
+#### Secret: `whatsapp-webhook-agent-engine-config`
+Create a file named `agent_engine.yaml` with your Agent Engine info:
+```yaml
+project_id: "YOUR_PROJECT_ID"
+location: "us-central1"
+reasoning_engine_id: "YOUR_REASONING_ENGINE_ID"
+```
+
+Upload it to Secret Manager:
+```bash
+gcloud secrets create whatsapp-webhook-agent-engine-config --replication-policy="automatic"
+gcloud secrets versions add whatsapp-webhook-agent-engine-config --data-file="agent_engine.yaml"
+```
+
+### 3. Verification Token & WhatsApp Token
+- **WHATSAPP_VERIFY_TOKEN**: This should be stored as a secret named `WHATSAPP_VERIFY_TOKEN`.
+```bash
+gcloud secrets create WHATSAPP_VERIFY_TOKEN --replication-policy="automatic"
+echo -n "YOUR_VERIFY_TOKEN" | gcloud secrets versions add WHATSAPP_VERIFY_TOKEN --data-file=-
+```
 
 ## Environment Variables
-The application requires the following environment variables to function correctly:
 
-- `PORT`: (Optional) Port to run on. Defaults to 8080.
-- `WEBHOOK_VERIFY_TOKEN`: A custom token used by WhatsApp to verify the webhook URL.
-- `WHATSAPP_TOKEN`: A permanent or temporary access token from Meta App Dashboard to send messages back.
-- `DIALOGFLOW_PROJECT_ID`: Your Google Cloud Project ID.
-- `DIALOGFLOW_LOCATION`: Location of your CX Agent (e.g., `global`, `us-central1`).
-- `DIALOGFLOW_AGENT_ID`: The ID of your Dialogflow CX Agent.
+The application uses the following environment variables (mostly for non-sensitive routing defaults):
+
+- `ROUTING_TARGET`: Controls where messages are sent. Options: `AGENT_ENGINE` (default) or `DIALOGFLOW`.
+- `LOCATION`: The GCP region (default: `us-central1`).
+- `LOG_LEVEL`: Logging level (default: `INFO`).
 
 ## How to Run Locally
 
 1. Install dependencies:
    ```bash
-   npm install
+   pip install -r requirements.txt
+   # OR with uv
+   uv pip install -r pyproject.toml
    ```
 
-2. Create a `.env` file in the root directory and define the variables mentioned above.
+2. Set up local authentication:
+   ```bash
+   gcloud auth application-default login
+   ```
 
-3. Start the server
-  ```bash
-  npm start
-  ```
+3. Run the application:
+   ```bash
+   python main.py
+   ```
 
 ## How to Deploy to Google Cloud Run
 
-1. Build and push the Docker image to Google Container Registry or Artifact Registry:
-   ```bash
-   gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/whatsapp-webhook
-   ```
+The included `deploy.sh` script handles deployment.
 
-2. Deploy the container to Cloud Run:
-   ```bash
-   gcloud run deploy whatsapp-webhook \
-     --image gcr.io/YOUR_PROJECT_ID/whatsapp-webhook \
-     --platform managed \
-     --region YOUR_REGION \
-     --allow-unauthenticated \
-     --set-env-vars WEBHOOK_VERIFY_TOKEN=...,WHATSAPP_TOKEN=...,DIALOGFLOW_PROJECT_ID=...,DIALOGFLOW_LOCATION=...,DIALOGFLOW_AGENT_ID=...
-   ```
+```bash
+./deploy.sh
+```
 
-## WhatsApp Webhook Configuration
-In the Meta App Dashboard, set your Webhook URL to the Cloud Run service URL appended with `/webhook` (e.g. `https://whatsapp-webhook-abc123def-uc.a.run.app/webhook`). Use the `WEBHOOK_VERIFY_TOKEN` you configured. Subscribe to the `messages` event.
+**Note**: The Cloud Run service account must have permission to access the secrets.
+```bash
+# Grant Secret Accessor to the Compute Engine default service account (or your specific service account)
+PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)")
+gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+```

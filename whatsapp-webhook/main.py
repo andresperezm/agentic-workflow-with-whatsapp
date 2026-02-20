@@ -4,11 +4,14 @@ import logging
 import requests
 import hmac
 import hashlib
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort
+import threading
+import time
 from google.cloud.dialogflowcx_v3.services.sessions.client import SessionsClient
 from google.cloud.dialogflowcx_v3.types.session import DetectIntentRequest, TextInput, QueryInput
 import vertexai
 from vertexai import agent_engines
+import asyncio
 from dotenv import load_dotenv
 from whatsapp_models import parse_webhook_payload
 
@@ -22,65 +25,157 @@ LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
-
 app = Flask(__name__)
-
 
 # Environment variables
 PORT = int(os.environ.get('PORT', 8080))
-WEBHOOK_VERIFY_TOKEN = os.environ.get('WEBHOOK_VERIFY_TOKEN')
-
-
 ROUTING_TARGET = os.environ.get('ROUTING_TARGET', 'AGENT_ENGINE')
 
-if ROUTING_TARGET == 'AGENT_ENGINE':
-    logger.info("Agent Engine routing enabled")
-    AGENT_ENGINE_PROJECT_NUMBER = os.environ.get('AGENT_ENGINE_PROJECT_NUMBER')
-    AGENT_ENGINE_LOCATION = os.environ.get('AGENT_ENGINE_LOCATION')
-    AGENT_ENGINE_REASONING_ENGINE_ID = os.environ.get('AGENT_ENGINE_REASONING_ENGINE_ID')
+PROJECT_ID = os.environ.get('PROJECT_ID')
+LOCATION = os.environ.get('LOCATION', 'us-central1')
+AGENT_ID = os.environ.get('AGENT_ID')
+AGENT_LANGUAGE_CODE = os.environ.get('AGENT_LANGUAGE_CODE', 'en')
 
-    missing_ae_vars = []
-    if not AGENT_ENGINE_PROJECT_NUMBER:
-        missing_ae_vars.append('AGENT_ENGINE_PROJECT_NUMBER')
-    if not AGENT_ENGINE_LOCATION:
-        missing_ae_vars.append('AGENT_ENGINE_LOCATION')
-    if not AGENT_ENGINE_REASONING_ENGINE_ID:
-        missing_ae_vars.append('AGENT_ENGINE_REASONING_ENGINE_ID')
+# WhatsApp API
+WHATSAPP_VERIFY_TOKEN = os.environ.get('WHATSAPP_VERIFY_TOKEN')
+WHATSAPP_APP_SECRET = os.environ.get('WHATSAPP_APP_SECRET')
+SEND_WHATSAPP_RESPONSE = os.environ.get('SEND_WHATSAPP_RESPONSE', 'TRUE').upper() == 'TRUE'
+WHATSAPP_API_VERSION = os.environ.get('WHATSAPP_API_VERSION', 'v24.0')
+WHATSAPP_API_TOKEN = os.environ.get('WHATSAPP_API_TOKEN')
 
-    if missing_ae_vars:
-        logger.error(f"Missing required environment variables for Agent Engine: {', '.join(missing_ae_vars)}")
-        exit(1)
 
-    AGENT_ENGINE_RESOURCE_NAME = f"projects/{AGENT_ENGINE_PROJECT_NUMBER}/locations/{AGENT_ENGINE_LOCATION}/reasoningEngines/{AGENT_ENGINE_REASONING_ENGINE_ID}"
-    vertex_client = vertexai.Client(
-        project=AGENT_ENGINE_PROJECT_NUMBER,
-        location=AGENT_ENGINE_LOCATION,
-    )
-    agent = vertex_client.agent_engines.get(name=AGENT_ENGINE_RESOURCE_NAME)
-elif ROUTING_TARGET == 'DIALOGFLOW':
-    logger.info("Dialogflow CX routing enabled")
-    DIALOGFLOW_PROJECT_ID = os.environ.get('DIALOGFLOW_PROJECT_ID')
-    DIALOGFLOW_AGENT_ID = os.environ.get('DIALOGFLOW_AGENT_ID')
-    DIALOGFLOW_LOCATION = os.environ.get('DIALOGFLOW_LOCATION')
-
-    missing_df_vars = []
-    if not DIALOGFLOW_PROJECT_ID:
-        missing_df_vars.append('DIALOGFLOW_PROJECT_ID')
-    if not DIALOGFLOW_AGENT_ID:
-        missing_df_vars.append('DIALOGFLOW_AGENT_ID')
-    if not DIALOGFLOW_LOCATION:
-        missing_df_vars.append('DIALOGFLOW_LOCATION')
-
-    if missing_df_vars:
-        logger.error(f"Missing required environment variables for Dialogflow CX: {', '.join(missing_df_vars)}")
-        exit(1)
-    DIALOGFLOW_LANGUAGE_CODE = os.environ.get('DIALOGFLOW_LANGUAGE_CODE', 'en')
-    api_endpoint = f"{DIALOGFLOW_LOCATION}-dialogflow.googleapis.com"
-    session_client = SessionsClient(client_options={"api_endpoint": api_endpoint})
-    
-else:
-    logger.error(f"Invalid ROUTING_TARGET: {ROUTING_TARGET}")
+if not PROJECT_ID:
+    logger.error("Could not determine PROJECT_ID. Please ensure PROJECT_ID is set.")
     exit(1)
+
+logger.info(f"Using Project ID: {PROJECT_ID} and Region: {LOCATION} for loading secrets")
+
+
+# Global clients (Lazy loading)
+_dialogflow_session_client = None
+
+def get_vertex_agent():
+    if not AGENT_ID:
+        logger.error("AGENT_ID environment variable not set")
+        raise ValueError("AGENT_ID not set")
+
+    agent_engine_resource_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{AGENT_ID}"
+    
+    logger.info(f"Initializing Vertex AI Agent Engine: {agent_engine_resource_name}")
+    try:
+        # Always create a fresh client to ensure it binds to the current (background) asyncio loop
+        vertex_client = vertexai.Client(project=PROJECT_ID, location=LOCATION)
+        return vertex_client.agent_engines.get(name=agent_engine_resource_name)
+    except Exception as e:
+        logger.error(f"Failed to get agent {agent_engine_resource_name}: {e}")
+        raise e
+
+def get_dialogflow_session_client():
+    global _dialogflow_session_client
+    if _dialogflow_session_client:
+        return _dialogflow_session_client
+
+    if not AGENT_ID:
+        logger.error("AGENT_ID environment variable not set (required for Dialogflow Agent ID)")
+        raise ValueError("AGENT_ID not set")
+
+    logger.info("Initializing Dialogflow CX Session Client")
+    api_endpoint = f"{LOCATION}-dialogflow.googleapis.com"
+    _dialogflow_session_client = SessionsClient(client_options={"api_endpoint": api_endpoint})
+    return _dialogflow_session_client
+
+
+
+def mask_phone_number(phone_number: str) -> str:
+    """Masks a phone number, showing only the last 4 digits."""
+    if not phone_number or len(phone_number) < 4:
+        return "****"
+    return f"*****{phone_number[-4:]}"
+
+def validate_signature(payload, signature):
+    """
+    Validates the X-Hub-Signature-256 header.
+    """
+    if not WHATSAPP_APP_SECRET:
+        # Check if running in Cloud Run (K_SERVICE is always set in Cloud Run)
+        is_cloud_run = os.environ.get('K_SERVICE') is not None
+        
+        if is_cloud_run:
+            logger.error("WHATSAPP_APP_SECRET not set. Cannot validate signature. rejecting request.")
+            return False
+        else:
+            logger.warning("WHATSAPP_APP_SECRET not set. Skipping signature validation (Local).")
+            return True
+    
+    if not signature:
+        return False
+        
+    expected_signature = hmac.new(
+        bytes(WHATSAPP_APP_SECRET, 'latin-1'),
+        msg=payload,
+        digestmod=hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(f'sha256={expected_signature}', signature)
+
+def send_whatsapp_message(phone_number_id, to, message_body):
+    """
+    Sends a text message to a user via WhatsApp Graph API.
+    """
+    if not SEND_WHATSAPP_RESPONSE:
+        logger.info(f"[{to}] Skipping WhatsApp message delivery")
+        logger.debug(f"[{to}] WhatsApp message: {message_body}")
+        return
+
+    if not WHATSAPP_API_TOKEN:
+        logger.error("WHATSAPP_API_TOKEN not set. Cannot send message.")
+        return
+
+    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {"body": message_body}
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.info(f"Message sent to {to}: {response.json()}")
+    except Exception as e:
+        logger.error(f"Failed to send message to {to}: {e}")
+
+def mark_message_as_read(phone_number_id, message_id):
+    """
+    Marks a message as read.
+    """
+    if not WHATSAPP_API_TOKEN:
+        logger.error("WHATSAPP_API_TOKEN not set. Cannot mark message as read.")
+        return
+
+    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.debug(f"Message {message_id} marked as read.")
+    except Exception as e:
+        logger.error(f"Failed to mark message {message_id} as read: {e}")
 
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook_message():
@@ -95,7 +190,7 @@ def webhook_message():
         challenge = request.args.get('hub.challenge')
 
         if mode and token:
-            if mode == 'subscribe' and token == WEBHOOK_VERIFY_TOKEN:
+            if mode == 'subscribe' and token == WHATSAPP_VERIFY_TOKEN:
                 logger.info("Webhook verified successfully.")
                 return challenge, 200
             else:
@@ -104,169 +199,242 @@ def webhook_message():
         return 'Bad Request', 400
 
     # Handle Message Processing (POST)
+    # Validate Signature
+    signature = request.headers.get('X-Hub-Signature-256')
+    if not validate_signature(request.data, signature):
+        logger.warning("Signature verification failed.")
+        return 'Forbidden', 403
+
     try:
         body = request.get_json()
-        payload = parse_webhook_payload(body)
-
-        if payload.entry:
-            for entry in payload.entry:
-                for change in entry.changes:
-
-                    if change.value.messages:
-                        for msg in change.value.messages:
-                            from_number = msg.from_
-                            logger.info(f"[{from_number}] Processing message type: {msg.type}")
-
-                            if msg.type == 'text':
-                                msg_body = msg.text.body
-                                logger.debug(f'[{from_number}] Text message received: "{msg_body}"')
-                                logger.info(f"[{from_number}] Routing text message to {ROUTING_TARGET}")
-
-                                if ROUTING_TARGET == 'AGENT_ENGINE':
-                                    forward_to_adk_agent_engine(from_number, msg_body)
-                                    return 'OK', 202
-                                elif ROUTING_TARGET == 'DIALOGFLOW':
-                                    forward_to_dialogflow_cx(from_number, msg_body)
-                                    return 'OK', 202
-
-                            elif msg.type == 'interactive':
-                                interactive_type = msg.interactive.type
-                                msg_body = None
-
-                                if interactive_type == 'button_reply':
-                                    if msg.interactive.button_reply:
-                                        msg_body = msg.interactive.button_reply.id
-                                        logger.debug(f'[{from_number}] Interactive button reply id: "{msg_body}" title: "{msg.interactive.button_reply.title}"')
-                                elif interactive_type == 'list_reply':
-                                    if msg.interactive.list_reply:
-                                        msg_body = msg.interactive.list_reply.id
-                                        logger.debug(f'[{from_number}] Interactive list reply id: "{msg_body}" title: "{msg.interactive.list_reply.title}"')
-                                else:
-                                    logger.warning(f"[{from_number}] Unsupported interactive type: {interactive_type}")
-                                    return 'Unsupported interactive type', 415
-
-                                if msg_body:
-                                    logger.info(f"[{from_number}] Routing interactive message to {ROUTING_TARGET}")
-                                    if ROUTING_TARGET == 'AGENT_ENGINE':
-                                        forward_to_adk_agent_engine(from_number, msg_body)
-                                        return 'OK', 202
-                                    elif ROUTING_TARGET == 'DIALOGFLOW':
-                                        forward_to_dialogflow_cx(from_number, msg_body)
-                                        return 'OK', 202
-                                else:
-                                    logger.warning(f"[{from_number}] Missing content for interactive message type: {interactive_type}")
-                                    return 'Missing content', 400
-
-                            elif msg.type == 'button':
-                                msg_body = msg.button.payload or msg.button.text
-                                logger.debug(f'[{from_number}] Button message received: "{msg_body}"')
-                                logger.info(f"[{from_number}] Routing button message to {ROUTING_TARGET}")
-
-                                if ROUTING_TARGET == 'AGENT_ENGINE':
-                                    forward_to_adk_agent_engine(from_number, msg_body)
-                                    return 'OK', 202
-                                elif ROUTING_TARGET == 'DIALOGFLOW':
-                                    forward_to_dialogflow_cx(from_number, msg_body)
-                                    return 'OK', 202
-
-                            else:
-                                logger.warning(f"[{from_number}] Unsupported message type: {msg.type}")
-                                return 'Unsupported message type', 415
-                    else:
-                        logger.debug(f"No messages in entry: {entry}")
-                        return 'No messages entry', 200
-
-            return 'Unprocessable Entity', 400
-        else:
-            logger.warning("No entry in payload")
-            return 'No entry in payload', 400
+        
+        # Start background processing
+        thread = threading.Thread(target=process_webhook_payload, args=(body,))
+        thread.start()
+        
+        # Return 200 OK immediately
+        return 'OK', 200
 
     except Exception as e:
         logger.error(f'Error handling webhook POST: {e}', exc_info=True)
         return 'Internal Server Error', 500
 
-
-def forward_to_dialogflow_cx(session_id: str, query: str):
+def process_webhook_payload(body):
     """
-    Detects Intent in Dialogflow CX
+    Processes the webhook payload in a background thread.
     """
     try:
+        payload = parse_webhook_payload(body)
+
+        if payload.entry:
+            for entry in payload.entry:
+                for change in entry.changes:
+                    if change.value.messages:
+                        # Extract phone_number_id for API calls
+                        phone_number_id = change.value.metadata.phone_number_id
+
+                        for msg in change.value.messages:
+                            user_phone_number = msg.from_
+                            message_id = msg.id
+                            
+                            # Mark as read immediately
+                            mark_message_as_read(phone_number_id, message_id)
+                            
+                            masked_phone = mask_phone_number(user_phone_number)
+                            logger.info(f"[{masked_phone}] Processing message type: {msg.type}")
+
+                            msg_body = None
+                            if msg.type == 'text':
+                                msg_body = msg.text.body
+                                logger.debug(f'[{masked_phone}] Text message received: "{msg_body}"')
+                            elif msg.type == 'interactive':
+                                interactive_type = msg.interactive.type
+                                if interactive_type == 'button_reply':
+                                    if msg.interactive.button_reply:
+                                        msg_body = msg.interactive.button_reply.id
+                                elif interactive_type == 'list_reply':
+                                    if msg.interactive.list_reply:
+                                        msg_body = msg.interactive.list_reply.id
+                            elif msg.type == 'button':
+                                msg_body = msg.button.payload or msg.button.text
+                            
+                            if msg_body:
+                                logger.info(f"[{masked_phone}] Routing message to '{ROUTING_TARGET}'")
+                                if ROUTING_TARGET == 'AGENT_ENGINE':
+                                    logger.info(f"[{masked_phone}] Offloading forward_to_adk_agent_engine to background thread...")
+                                    # Run synchronous function in a separate thread to avoid blocking Flask
+                                    t = threading.Thread(
+                                        target=forward_to_adk_agent_engine,
+                                        args=(user_phone_number, msg_body, phone_number_id)
+                                    )
+                                    t.start()
+                                    logger.info(f"[{masked_phone}] Background thread started.")
+                                elif ROUTING_TARGET == 'DIALOGFLOW':
+                                    forward_to_dialogflow_cx(user_phone_number, msg_body, phone_number_id)
+                                else:
+                                    logger.warning(f"[{masked_phone}] Unknown ROUTING_TARGET: '{ROUTING_TARGET}'")
+                            else:
+                                logger.warning(f"[{masked_phone}] Unsupported or empty message body for type: {msg.type}")
+
+                    else:
+                        logger.info(f"No messages in entry")
+    except Exception as e:
+        logger.error(f"Error in background processing: {e}", exc_info=True)
+
+
+
+from google.protobuf import struct_pb2
+from google.cloud.dialogflowcx_v3.types.session import DetectIntentRequest, TextInput, QueryInput, QueryParameters
+
+# ... (imports continue)
+
+
+def forward_to_dialogflow_cx(user_phone_number: str, query: str, phone_number_id: str):
+    """
+    Detects Intent in Dialogflow CX and sends response back to WhatsApp.
+    """
+    try:
+        session_client = get_dialogflow_session_client()
         session_path = session_client.session_path(
-            project=DIALOGFLOW_PROJECT_ID,
-            location=DIALOGFLOW_LOCATION,
-            agent=DIALOGFLOW_AGENT_ID,
-            session=session_id
+            project=PROJECT_ID,
+            location=LOCATION,
+            agent=AGENT_ID,
+            session=user_phone_number
         )
 
         text_input = TextInput(text=query)
-        query_input = QueryInput(text=text_input, language_code=DIALOGFLOW_LANGUAGE_CODE)
+        query_input = QueryInput(text=text_input, language_code=AGENT_LANGUAGE_CODE)
+
+        # Construct QueryParameters with user phone
+        query_params = QueryParameters()
+        
+        if user_phone_number:
+            params = struct_pb2.Struct()
+            context_struct = struct_pb2.Struct()
+            
+            context_data = {
+                "userPhone": user_phone_number
+            }
+                
+            context_struct.update(context_data)
+            params["context"] = context_struct
+            
+            logger.debug(f"[{mask_phone_number(user_phone_number)}] Adding phone number to Dialogflow request in: $session.params.context.userPhone")
+            query_params.parameters = params
 
         req = DetectIntentRequest(
             session=session_path,
-            query_input=query_input
+            query_input=query_input,
+            query_params=query_params
         )
 
         response = session_client.detect_intent(request=req)
-        logger.info(f"[{session_id}] Message processed by Dialogflow CX")
-        logger.debug(f"[{session_id}] Dialogflow CX Response: {response}")
+        # Extract text response from Dialogflow
+        response_texts = []
+        if response.query_result and response.query_result.response_messages:
+            for msg in response.query_result.response_messages:
+                if msg.text and msg.text.text:
+                    response_texts.extend(msg.text.text)
+        
+        full_response_text = " ".join(response_texts)
+        masked_phone = mask_phone_number(user_phone_number)
+        logger.info(f"[{masked_phone}] Dialogflow CX response id: {response.response_id}")
+        logger.debug(f"[{masked_phone}] Dialogflow CX response: {response}")
+        
+        if full_response_text:
+            send_whatsapp_message(phone_number_id, user_phone_number, full_response_text)
+        else:
+            logger.warning(f"[{masked_phone}] No text response from Dialogflow.")
 
     except Exception as e:
         logger.error(f'Dialogflow CX Error: {e}', exc_info=True)
 
 
-def forward_to_adk_agent_engine(user_id: str, query: str):
+
+
+async def forward_to_adk_agent_engine_dummy():
+    # Placeholder to keep imports valid if needed, or just remove
+    pass
+
+def forward_to_adk_agent_engine(user_phone_number: str, query: str, phone_number_id: str):
     """
-    Queries the Vertex AI Agent Engine (Reasoning Engine)
-    Ensures only one session exists per user (phone number).
+    Queries the Vertex AI Agent Engine (Reasoning Engine) and sends response back to WhatsApp.
+    Ensures only one session exists per user (phone number) by deleting older sessions.
+    Runs SYNCHRONOUSLY in a background thread.
     """
-    try:
-        session_id = None
-        # Check for existing sessions for this user
+    max_retries = 1
+    for attempt in range(max_retries + 1):
         try:
-            sessions_resp = agent.list_sessions(user_id=user_id)
-            for session in sessions_resp.get('sessions', []):
-                if session.get('userId') == user_id:
-                    session_id = session.get('id')
-                    logger.info(f"[{user_id}] Found existing session: {session_id}")
-                    break
+            session_id = ""
+            agent = get_vertex_agent()
+            masked_phone = mask_phone_number(user_phone_number)
+
+            # 1. List existing sessions SYNCHRONOUSLY
+            logger.debug(f"[{masked_phone}] Listing sessions (Attempt {attempt+1})...")
+            # Using SYNC method
+            sessions_resp = agent.list_sessions(user_id=user_phone_number)
+            sessions = sessions_resp.get('sessions', [])
+            
+            # ... (Session optimization logic)
+            if sessions:
+                 # Use the first session found
+                session_id = sessions[0].get('id')
+                logger.info(f"[{masked_phone}] Reusing session: {session_id}")
+                
+                # Delete duplicate sessions if any
+                if len(sessions) > 1:
+                    logger.info(f"[{masked_phone}] Found {len(sessions)} sessions. Cleaning up duplicates...")
+                    for i in range(1, len(sessions)):
+                        old_session = sessions[i]
+                        old_id = old_session.get('id')
+                        try:
+                            # Using SYNC method
+                            agent.delete_session(user_id=user_phone_number, session_id=old_id)
+                            logger.debug(f"[{masked_phone}] Deleted old session: {old_id}")
+                        except Exception as del_err:
+                            logger.warning(f"[{masked_phone}] Failed to delete session {old_id}: {del_err}")
+            else:
+                logger.info(f"[{masked_phone}] No existing session found. A new one will be created automatically.")
+
+            full_response_text = ""
+            
+            # 3. Stream query SYNCHRONOUSLY
+            # Pass both user_id and the resolved session_id. Returns an iterator.
+            response_iterator = agent.stream_query(message=query, user_id=user_phone_number, session_id=session_id)
+            
+            for response in response_iterator:
+                try:
+                    # Check for the structure provided in the sample
+                    if 'content' in response and 'parts' in response['content']:
+                        parts = response['content']['parts']
+                        for part in parts:
+                            if 'text' in part:
+                                text_chunk = part['text']
+                                full_response_text += text_chunk
+                                # Optional: Accumulate and send chunks if desired, but buffering full response is safer logic-wise
+                    else:
+                        # Fallback simple text access if different structure
+                        logger.debug(f"[{masked_phone}] Raw response chunk: {response}")
+                        
+                except Exception as parse_err:
+                    logger.warning(f"[{masked_phone}] Error parsing chunk: {parse_err}")
+
+            if full_response_text:
+                logger.debug(f"[{masked_phone}] Agent Engine response: {full_response_text}")
+                send_whatsapp_message(phone_number_id, user_phone_number, full_response_text)
+            else:
+                logger.warning(f"[{masked_phone}] No text in response")
+            
+            # If we reached here, success
+            return
+
         except Exception as e:
-            logger.error(f"[{user_id}] Error listing sessions: {e}", exc_info=True)
-
-        # Create new session if none found
-        if not session_id:
-            try:
-                logger.info(f"[{user_id}] Creating new session...")
-                session = agent.create_session(user_id=user_id)
-                if hasattr(session, 'name'):
-                    session_id = session.name.split('/')[-1]
-                elif isinstance(session, dict):
-                    session_id = session.get('id') or session.get('name', '').split('/')[-1]
-                logger.info(f"[{user_id}] Created new session: {session_id}")
-            except Exception as e:
-                logger.error(f"[{user_id}] Failed to create session: {e}", exc_info=True)
-
-        full_response_text = ""
-        
-        # Stream query the agent
-        # Pass both user_id and the resolved session_id
-        for response in agent.stream_query(message=query, user_id=user_id, session_id=session_id):
-            try:
-                # Check for the structure provided in the sample
-                if 'content' in response and 'parts' in response['content']:
-                    parts = response['content']['parts']
-                    for part in parts:
-                        if 'text' in part:
-                            full_response_text += part['text']
-            except Exception as e:
-                logger.error(f"[{user_id}] Error parsing chunk: {e}")
-
-        if full_response_text:
-            logger.debug(f"[{user_id}] Agent Engine response: {full_response_text}")
-        else:
-            logger.warning(f"[{user_id}] No text in response")
-
-    except Exception as e:
-        logger.error(f'[{user_id}] Agent Engine Error: {e}', exc_info=True)
+            logger.error(f"[{mask_phone_number(user_phone_number)}] Agent Engine Error (Attempt {attempt+1}): {e}", exc_info=True)
+            if attempt < max_retries:
+                logger.warning(f"[{mask_phone_number(user_phone_number)}] Retrying after error...")
+                time.sleep(1) # Brief pause (sync sleep)
+            else:
+                logger.error(f"[{mask_phone_number(user_phone_number)}] All retries failed.")
 
 
 
