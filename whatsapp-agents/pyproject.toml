@@ -6,8 +6,7 @@ description = "Agent to send whatsapp messages based on user interactions"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "google-adk==1.20.0",
-    "google-genai==1.54.0",
+    "google-adk==1.28.0",
     "google-auth>=2.43.0",
     "google-cloud-secret-manager>=2.21.0",
 ]
